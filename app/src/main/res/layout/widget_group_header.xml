@@ -28,14 +28,14 @@
             android:layout_height="wrap_content"
             android:textSize="16sp"
             android:textStyle="bold"
-            android:textColor="@android:color/black" />
+            android:textColor="?android:attr/textColorPrimary" />
 
         <TextView
             android:id="@+id/widget_count"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:textSize="12sp"
-            android:textColor="@android:color/darker_gray" />
+            android:textColor="?android:attr/textColorSecondary" />
 
     </LinearLayout>
 
@@ -47,7 +47,7 @@
         android:gravity="center"
         android:text="▼"
         android:textSize="12sp"
-        android:textColor="@android:color/darker_gray"
+        android:textColor="?android:attr/textColorSecondary"
         android:contentDescription="Expand" />
 
 </LinearLayout>

@@ -33,6 +33,8 @@ class MainActivity : AppCompatActivity() {
         val fabAddWidget: FloatingActionButton = findViewById(R.id.fab_add_widget)
         val fabSmaller: FloatingActionButton = findViewById(R.id.fab_smaller)
         val fabBigger: FloatingActionButton = findViewById(R.id.fab_bigger)
+        val fabScaleDown: FloatingActionButton = findViewById(R.id.fab_scale_down)
+        val fabScaleUp: FloatingActionButton = findViewById(R.id.fab_scale_up)
         val sizeInfo: TextView = findViewById(R.id.size_info)
         val controlPanel = findViewById<ViewGroup>(R.id.control_panel)
 
@@ -50,6 +52,16 @@ class MainActivity : AppCompatActivity() {
 
         fabBigger.setOnClickListener {
             currentWidgetView?.makeBigger()
+            updateSizeInfo()
+        }
+
+        fabScaleDown.setOnClickListener {
+            currentWidgetView?.scaleDown()
+            updateSizeInfo()
+        }
+
+        fabScaleUp.setOnClickListener {
+            currentWidgetView?.scaleUp()
             updateSizeInfo()
         }
     }
@@ -197,9 +209,12 @@ class MainActivity : AppCompatActivity() {
     private fun updateSizeInfo() {
         val sizeInfo = findViewById<TextView>(R.id.size_info)
         currentWidgetView?.let { widget ->
-            val info = widget.getSizeInfo()
-            if (info.isNotEmpty()) {
-                sizeInfo.text = info
+            val currentSizeInfo = widget.getSizeInfo()
+            val constraintsInfo = widget.getWidgetConstraints()
+            val fullInfo = "$currentSizeInfo\n\n$constraintsInfo"
+            
+            if (currentSizeInfo.isNotEmpty()) {
+                sizeInfo.text = fullInfo
                 sizeInfo.visibility = ViewGroup.VISIBLE
             }
         }

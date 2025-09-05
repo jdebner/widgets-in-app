@@ -3,6 +3,8 @@ package com.widgetapp
 import android.appwidget.AppWidgetHostView
 import android.appwidget.AppWidgetProviderInfo
 import android.content.Context
+import android.hardware.display.DisplayManager
+import android.view.Display
 import kotlin.math.max
 
 class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) {
@@ -21,9 +23,32 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
     private var minResizeWidth = 140
     private var minResizeHeight = 140
     
-    private val cellSize = 70 * context.resources.displayMetrics.density
-    private var availableSizes = listOf<Pair<Int, Int>>()
+    // Android widget grid system: 56dp per grid unit
+    private val gridCellSizeDp = 56
+    private val gridCellSizePx = gridCellSizeDp * getPrimaryDisplayDensity()
+    private var availableGridSizes = listOf<Pair<Int, Int>>() // Grid units (e.g., 1x1, 2x1)
     private var currentSizeIndex = 0
+    
+    // Widget size constraints in grid units
+    private var minGridWidth = 1
+    private var minGridHeight = 1
+    private var maxGridWidth = 5
+    private var maxGridHeight = 5
+    private var minResizeGridWidth = 1
+    private var minResizeGridHeight = 1
+    
+    // Scale factor for automotive/display scaling
+    private var scaleFactor = 1.0f
+    private val availableScaleFactors = listOf(0.5f, 0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f)
+    private var currentScaleIndex = 2 // Start at 1.0f
+    
+    private fun getPrimaryDisplayDensity(): Float {
+        val displayManager = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val primaryDisplay = displayManager.getDisplay(Display.DEFAULT_DISPLAY)
+        val displayMetrics = android.util.DisplayMetrics()
+        primaryDisplay?.getRealMetrics(displayMetrics)
+        return displayMetrics.density
+    }
     
     
     fun initializeWidget(
@@ -39,23 +64,62 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         minResizeWidth = minResizeW
         minResizeHeight = minResizeH
         
-        // Calculate available widget sizes based on constraints
-        availableSizes = calculateAvailableSizes()
+        // Convert pixel sizes to grid units
+        val density = getPrimaryDisplayDensity()
+        minGridWidth = dpToGridUnits((minW / density).toInt())
+        minGridHeight = dpToGridUnits((minH / density).toInt())
+        minResizeGridWidth = dpToGridUnits((minResizeW / density).toInt())
+        minResizeGridHeight = dpToGridUnits((minResizeH / density).toInt())
         
-        // Set initial size to minimum
-        currentWidth = minWidth
-        currentHeight = minHeight
+        // Calculate max reasonable grid sizes (5x5 should cover most widgets)
+        maxGridWidth = 5
+        maxGridHeight = 5
+        
+        // Calculate available widget sizes in grid units
+        availableGridSizes = calculateGridSizes()
+        
+        // Set initial size to minimum grid size
+        val initialGridSize = availableGridSizes.firstOrNull() ?: Pair(minResizeGridWidth, minResizeGridHeight)
+        currentWidth = gridUnitsToPixels(initialGridSize.first)
+        currentHeight = gridUnitsToPixels(initialGridSize.second)
         currentSizeIndex = 0
         
         layoutParams = layoutParams?.apply {
             width = currentWidth
             height = currentHeight
         } ?: android.widget.FrameLayout.LayoutParams(currentWidth, currentHeight)
+        
+        // Apply initial scale factor
+        scaleFactor = availableScaleFactors[currentScaleIndex]
+        applyScaleTransform()
+    }
+    
+    private fun dpToGridUnits(dp: Int): Int {
+        return kotlin.math.max(1, kotlin.math.ceil(dp.toDouble() / gridCellSizeDp).toInt())
+    }
+    
+    private fun gridUnitsToPixels(gridUnits: Int): Int {
+        return (gridUnits * gridCellSizePx).toInt()
+    }
+    
+    private fun gridUnitsToDp(gridUnits: Int): Int {
+        return gridUnits * gridCellSizeDp
+    }
+    
+    private fun applyScaleTransform() {
+        scaleX = scaleFactor
+        scaleY = scaleFactor
+        
+        // Ensure widget stays centered after scaling
+        pivotX = currentWidth / 2f
+        pivotY = currentHeight / 2f
+        
+        android.util.Log.d("WidgetApp", "Applied scale factor: ${scaleFactor} to widget ${currentWidth}x${currentHeight}")
     }
     
     fun refreshWidget() {
-        // Convert pixels to dp for widget size reporting
-        val density = context.resources.displayMetrics.density
+        // Convert pixels to dp for widget size reporting using primary display density
+        val density = getPrimaryDisplayDensity()
         val widthDp = (currentWidth / density).toInt()
         val heightDp = (currentHeight / density).toInt()
         
@@ -75,8 +139,8 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
             this.height = currentHeight
         }
         
-        // Convert pixels to dp for widget size reporting
-        val density = context.resources.displayMetrics.density
+        // Convert pixels to dp for widget size reporting using primary display density
+        val density = getPrimaryDisplayDensity()
         val widthDp = (currentWidth / density).toInt()
         val heightDp = (currentHeight / density).toInt()
         
@@ -91,78 +155,85 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
             child.requestLayout()
         }
         
+        // Reapply scale transform for new size
+        applyScaleTransform()
+        
         requestLayout()
         invalidate()
     }
     
     
-    private fun calculateAvailableSizes(): List<Pair<Int, Int>> {
-        val sizes = mutableListOf<Pair<Int, Int>>()
+    private fun calculateGridSizes(): List<Pair<Int, Int>> {
+        val gridSizes = mutableListOf<Pair<Int, Int>>()
         
-        // Use the widget's actual declared minimum size as the base
-        val baseWidth = minWidth
-        val baseHeight = minHeight
-        val resizeWidth = minResizeWidth
-        val resizeHeight = minResizeHeight
+        // Get widget's actual max constraints from AppWidgetProviderInfo
+        val actualMaxGridWidth = widgetInfo?.let { info ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                // API 31+ has maxResizeWidth/Height
+                val maxResizeWidthDp = if (info.maxResizeWidth > 0) {
+                    (info.maxResizeWidth / getPrimaryDisplayDensity()).toInt()
+                } else {
+                    gridUnitsToDp(maxGridWidth) // Use our default max
+                }
+                dpToGridUnits(maxResizeWidthDp)
+            } else {
+                maxGridWidth // Use our default max for older APIs
+            }
+        } ?: maxGridWidth
         
-        // Start with the widget's minimum size
-        sizes.add(Pair(baseWidth, baseHeight))
+        val actualMaxGridHeight = widgetInfo?.let { info ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                // API 31+ has maxResizeHeight
+                val maxResizeHeightDp = if (info.maxResizeHeight > 0) {
+                    (info.maxResizeHeight / getPrimaryDisplayDensity()).toInt()
+                } else {
+                    gridUnitsToDp(maxGridHeight) // Use our default max
+                }
+                dpToGridUnits(maxResizeHeightDp)
+            } else {
+                maxGridHeight // Use our default max for older APIs
+            }
+        } ?: maxGridHeight
         
-        // Add incremental sizes based on the minimum resize dimensions
-        // This ensures we use sizes the widget is more likely to support
-        val widthIncrement = if (resizeWidth > 0) resizeWidth else baseWidth
-        val heightIncrement = if (resizeHeight > 0) resizeHeight else baseHeight
+        // Check if widget is resizable
+        val isResizable = widgetInfo?.resizeMode != AppWidgetProviderInfo.RESIZE_NONE
         
-        // Generate larger sizes by adding increments
-        for (widthMultiplier in 1..4) {
-            for (heightMultiplier in 1..4) {
-                val width = resizeWidth + (widthIncrement * (widthMultiplier - 1))
-                val height = resizeHeight + (heightIncrement * (heightMultiplier - 1))
-                
-                // Only add if it's different from what we already have
-                val newSize = Pair(width, height)
-                if (!sizes.contains(newSize) && width >= resizeWidth && height >= resizeHeight) {
-                    sizes.add(newSize)
+        if (isResizable) {
+            // Generate grid combinations within widget's actual constraints
+            // Start from the larger of minWidth or minResizeWidth to respect the widget's true minimum
+            val startWidth = kotlin.math.max(minGridWidth, minResizeGridWidth)
+            val startHeight = kotlin.math.max(minGridHeight, minResizeGridHeight)
+            
+            for (width in startWidth..kotlin.math.min(actualMaxGridWidth, maxGridWidth)) {
+                for (height in startHeight..kotlin.math.min(actualMaxGridHeight, maxGridHeight)) {
+                    // Ensure sizes meet both the minimum size and minimum resize requirements
+                    if (width >= startWidth && height >= startHeight) {
+                        gridSizes.add(Pair(width, height))
+                    }
                 }
             }
+        } else {
+            // Non-resizable widget: only offer its minimum size
+            gridSizes.add(Pair(minGridWidth, minGridHeight))
         }
         
-        // Also add exact Android widget sizes that match system widget picker behavior
-        val commonAndroidSizes = listOf(
-            // Standard Android launcher widget sizes (based on 70dp cell size)
-            Pair(140, 70),   // 1x1 cell
-            Pair(280, 70),   // 2x1 cells  
-            Pair(280, 140),  // 2x2 cells (common for detailed widgets)
-            Pair(420, 70),   // 3x1 cells
-            Pair(420, 140),  // 3x2 cells
-            Pair(560, 140),  // 4x2 cells (wide detailed view)
-            Pair(280, 210),  // 2x3 cells (tall detailed view)  
-            Pair(420, 210),  // 3x3 cells
-            Pair(560, 210),  // 4x3 cells
-            // Pixel-specific sizes that might trigger visual layouts
-            Pair(294, 110),  
-            Pair(294, 220),  
-            Pair(470, 110),
-            Pair(470, 220),
-            Pair(470, 330),
-        )
+        android.util.Log.d("WidgetApp", "Widget grid constraints:")
+        android.util.Log.d("WidgetApp", "  Min size: ${minGridWidth}x${minGridHeight} grid units (${gridUnitsToDp(minGridWidth)}x${gridUnitsToDp(minGridHeight)}dp)")
+        android.util.Log.d("WidgetApp", "  Min resize: ${minResizeGridWidth}x${minResizeGridHeight} grid units (${gridUnitsToDp(minResizeGridWidth)}x${gridUnitsToDp(minResizeGridHeight)}dp)")
+        android.util.Log.d("WidgetApp", "  Actual max: ${actualMaxGridWidth}x${actualMaxGridHeight} grid units (${gridUnitsToDp(actualMaxGridWidth)}x${gridUnitsToDp(actualMaxGridHeight)}dp)")
+        android.util.Log.d("WidgetApp", "  App max: ${maxGridWidth}x${maxGridHeight} grid units (${gridUnitsToDp(maxGridWidth)}x${gridUnitsToDp(maxGridHeight)}dp)")
+        android.util.Log.d("WidgetApp", "Available grid sizes: ${gridSizes.map { "${it.first}x${it.second}" }}")
         
-        for (size in commonAndroidSizes) {
-            if (size.first >= resizeWidth && size.second >= resizeHeight && !sizes.contains(size)) {
-                sizes.add(size)
-            }
-        }
-        
-        android.util.Log.d("WidgetApp", "Widget constraints - minWidth: $minWidth, minHeight: $minHeight, resizeWidth: $resizeWidth, resizeHeight: $resizeHeight")
-        android.util.Log.d("WidgetApp", "Available widget sizes: ${sizes.map { "${it.first}x${it.second}" }}")
-        return sizes.distinct().sortedWith(compareBy({ it.first }, { it.second }))
+        return gridSizes.sortedWith(compareBy({ it.first }, { it.second }))
     }
     
     fun makeBigger(): Boolean {
-        if (currentSizeIndex < availableSizes.size - 1) {
+        if (currentSizeIndex < availableGridSizes.size - 1) {
             currentSizeIndex++
-            val newSize = availableSizes[currentSizeIndex]
-            resizeWidget(newSize.first, newSize.second)
+            val newGridSize = availableGridSizes[currentSizeIndex]
+            val newPixelWidth = gridUnitsToPixels(newGridSize.first)
+            val newPixelHeight = gridUnitsToPixels(newGridSize.second)
+            resizeWidget(newPixelWidth, newPixelHeight)
             return true
         }
         return false
@@ -171,8 +242,30 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
     fun makeSmaller(): Boolean {
         if (currentSizeIndex > 0) {
             currentSizeIndex--
-            val newSize = availableSizes[currentSizeIndex]
-            resizeWidget(newSize.first, newSize.second)
+            val newGridSize = availableGridSizes[currentSizeIndex]
+            val newPixelWidth = gridUnitsToPixels(newGridSize.first)
+            val newPixelHeight = gridUnitsToPixels(newGridSize.second)
+            resizeWidget(newPixelWidth, newPixelHeight)
+            return true
+        }
+        return false
+    }
+    
+    fun scaleUp(): Boolean {
+        if (currentScaleIndex < availableScaleFactors.size - 1) {
+            currentScaleIndex++
+            scaleFactor = availableScaleFactors[currentScaleIndex]
+            applyScaleTransform()
+            return true
+        }
+        return false
+    }
+    
+    fun scaleDown(): Boolean {
+        if (currentScaleIndex > 0) {
+            currentScaleIndex--
+            scaleFactor = availableScaleFactors[currentScaleIndex]
+            applyScaleTransform()
             return true
         }
         return false
@@ -182,12 +275,81 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         return Pair(currentWidth, currentHeight)
     }
     
+    fun getCurrentScale(): Float {
+        return scaleFactor
+    }
+    
+    fun getEffectiveSize(): Pair<Int, Int> {
+        val effectiveWidth = (currentWidth * scaleFactor).toInt()
+        val effectiveHeight = (currentHeight * scaleFactor).toInt()
+        return Pair(effectiveWidth, effectiveHeight)
+    }
+    
     fun getSizeInfo(): String {
-        if (availableSizes.isEmpty()) return ""
-        val density = context.resources.displayMetrics.density
-        val widthDp = (currentWidth / density).toInt()
-        val heightDp = (currentHeight / density).toInt()
-        return "${widthDp}×${heightDp}dp (${currentSizeIndex + 1}/${availableSizes.size})"
+        if (availableGridSizes.isEmpty()) return ""
+        val currentGridSize = availableGridSizes[currentSizeIndex]
+        val widthDp = gridUnitsToDp(currentGridSize.first)
+        val heightDp = gridUnitsToDp(currentGridSize.second)
+        val effectiveSize = getEffectiveSize()
+        val density = getPrimaryDisplayDensity()
+        val effectiveWidthDp = (effectiveSize.first / density).toInt()
+        val effectiveHeightDp = (effectiveSize.second / density).toInt()
+        
+        return """
+            Grid: ${currentGridSize.first}×${currentGridSize.second} (${widthDp}×${heightDp}dp) [${currentSizeIndex + 1}/${availableGridSizes.size}]
+            Scale: ${scaleFactor}x [${currentScaleIndex + 1}/${availableScaleFactors.size}]
+            Effective: ${effectiveWidthDp}×${effectiveHeightDp}dp
+        """.trimIndent()
+    }
+    
+    fun getWidgetConstraints(): String {
+        val minWidthDp = gridUnitsToDp(minGridWidth)
+        val minHeightDp = gridUnitsToDp(minGridHeight)
+        val minResizeWidthDp = gridUnitsToDp(minResizeGridWidth)
+        val minResizeHeightDp = gridUnitsToDp(minResizeGridHeight)
+        
+        // Get actual max from widget info
+        val actualMaxGridWidth = widgetInfo?.let { info ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && info.maxResizeWidth > 0) {
+                val maxResizeWidthDp = (info.maxResizeWidth / getPrimaryDisplayDensity()).toInt()
+                dpToGridUnits(maxResizeWidthDp)
+            } else {
+                maxGridWidth
+            }
+        } ?: maxGridWidth
+        
+        val actualMaxGridHeight = widgetInfo?.let { info ->
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S && info.maxResizeHeight > 0) {
+                val maxResizeHeightDp = (info.maxResizeHeight / getPrimaryDisplayDensity()).toInt()
+                dpToGridUnits(maxResizeHeightDp)
+            } else {
+                maxGridHeight
+            }
+        } ?: maxGridHeight
+        
+        val actualMaxWidthDp = gridUnitsToDp(actualMaxGridWidth)
+        val actualMaxHeightDp = gridUnitsToDp(actualMaxGridHeight)
+        
+        val resizableText = widgetInfo?.let { info ->
+            if (info.resizeMode != AppWidgetProviderInfo.RESIZE_NONE) {
+                val modes = mutableListOf<String>()
+                if (info.resizeMode and AppWidgetProviderInfo.RESIZE_HORIZONTAL != 0) modes.add("horizontal")
+                if (info.resizeMode and AppWidgetProviderInfo.RESIZE_VERTICAL != 0) modes.add("vertical")
+                "Resizable: ${modes.joinToString(", ")}"
+            } else {
+                "Not resizable"
+            }
+        } ?: "Unknown resize mode"
+        
+        return """
+            Widget Size Constraints:
+            Min: ${minGridWidth}×${minGridHeight} grid (${minWidthDp}×${minHeightDp}dp)
+            Min Resize: ${minResizeGridWidth}×${minResizeGridHeight} grid (${minResizeWidthDp}×${minResizeHeightDp}dp)  
+            Max: ${actualMaxGridWidth}×${actualMaxGridHeight} grid (${actualMaxWidthDp}×${actualMaxHeightDp}dp)
+            $resizableText
+            Grid Cell: ${gridCellSizeDp}dp
+            Available sizes: ${availableGridSizes.size}
+        """.trimIndent()
     }
     
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
