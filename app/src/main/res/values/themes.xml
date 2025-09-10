@@ -11,4 +11,11 @@
         <item name="windowNoTitle">true</item>
         <item name="android:windowFullscreen">true</item>
     </style>
+    
+    <!-- AppCompat theme for widget views -->
+    <style name="Theme.WidgetApp.AppCompat" parent="Theme.AppCompat.DayNight">
+        <item name="colorPrimary">@color/purple_500</item>
+        <item name="colorPrimaryDark">@color/purple_700</item>
+        <item name="colorAccent">@color/purple_500</item>
+    </style>
 </resources>

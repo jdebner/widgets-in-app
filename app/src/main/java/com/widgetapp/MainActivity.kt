@@ -1,17 +1,22 @@
 package com.widgetapp
 
+import android.Manifest
 import android.app.Activity
 import android.appwidget.AppWidgetHostView
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
 import android.content.ComponentName
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 
 class MainActivity : AppCompatActivity() {
@@ -24,9 +29,36 @@ class MainActivity : AppCompatActivity() {
     private val requestWidgetPicker = 100
     private val requestBindWidget = 101
     private val requestConfigureWidget = 102
+    private val requestPermissions = 200
+    
+    // Common widget permissions that need runtime approval
+    private val widgetPermissions = arrayOf(
+        Manifest.permission.ACCESS_FINE_LOCATION,
+        Manifest.permission.ACCESS_COARSE_LOCATION,
+        Manifest.permission.READ_CALENDAR,
+        Manifest.permission.READ_CONTACTS,
+        Manifest.permission.READ_EXTERNAL_STORAGE,
+        Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_SMS
+    ).let { permissions ->
+        // Add media permissions for API 33+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            permissions + arrayOf(
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO,
+                Manifest.permission.READ_MEDIA_AUDIO
+            )
+        } else {
+            permissions
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        // Install AppCompat compatibility hooks before any widget operations
+        AppCompatRemoteViewsHook.installCompatibilityHooks(this)
+        
         setContentView(R.layout.activity_main)
 
         widgetContainer = findViewById(R.id.widget_container)
@@ -64,6 +96,9 @@ class MainActivity : AppCompatActivity() {
             currentWidgetView?.scaleUp()
             updateSizeInfo()
         }
+        
+        // Request permissions needed for widgets
+        requestWidgetPermissions()
     }
 
     override fun onResume() {
@@ -160,7 +195,13 @@ class MainActivity : AppCompatActivity() {
             widgetHost.deleteAppWidgetId(it.appWidgetId)
         }
         
-        val hostView = widgetHost.createView(this, widgetId, appWidgetInfo) as ResizableAppWidgetHostView
+        android.util.Log.d("WidgetApp", "Creating widget view for: ${appWidgetInfo?.loadLabel(packageManager)}")
+        android.util.Log.d("WidgetApp", "Widget provider: ${appWidgetInfo?.provider}")
+        android.util.Log.d("WidgetApp", "Widget ID: $widgetId")
+        
+        try {
+            val hostView = widgetHost.createView(this, widgetId, appWidgetInfo) as ResizableAppWidgetHostView
+            android.util.Log.d("WidgetApp", "Widget host view created successfully")
         
         widgetContainer.removeAllViews()
         
@@ -201,8 +242,23 @@ class MainActivity : AppCompatActivity() {
         
         // Post to ensure the widget is properly laid out
         hostView.post {
+            android.util.Log.d("WidgetApp", "Refreshing widget...")
             hostView.refreshWidget()
             updateSizeInfo()
+            android.util.Log.d("WidgetApp", "Widget setup complete")
+        }
+        
+        } catch (e: Exception) {
+            android.util.Log.e("WidgetApp", "Failed to create widget: ${e.message}", e)
+            
+            // Clean up failed widget
+            widgetHost.deleteAppWidgetId(widgetId)
+            
+            // Show detailed error
+            val sizeInfo = findViewById<TextView>(R.id.size_info)
+            sizeInfo.text = "Couldn't add widget\nWidget: ${appWidgetInfo?.loadLabel(packageManager) ?: "Unknown"}\nError: ${e.message}\n\nThis widget may use AppCompat views that aren't compatible with RemoteViews."
+            sizeInfo.visibility = ViewGroup.VISIBLE
+            findViewById<ViewGroup>(R.id.control_panel).visibility = ViewGroup.GONE
         }
     }
     
@@ -216,6 +272,43 @@ class MainActivity : AppCompatActivity() {
             if (currentSizeInfo.isNotEmpty()) {
                 sizeInfo.text = fullInfo
                 sizeInfo.visibility = ViewGroup.VISIBLE
+            }
+        }
+    }
+    
+    private fun requestWidgetPermissions() {
+        val missingPermissions = widgetPermissions.filter { permission ->
+            ContextCompat.checkSelfPermission(this, permission) != PackageManager.PERMISSION_GRANTED
+        }
+        
+        if (missingPermissions.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                this,
+                missingPermissions.toTypedArray(),
+                requestPermissions
+            )
+        }
+    }
+    
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        
+        when (requestCode) {
+            requestPermissions -> {
+                val deniedPermissions = permissions.filterIndexed { index, _ ->
+                    grantResults[index] != PackageManager.PERMISSION_GRANTED
+                }
+                
+                if (deniedPermissions.isNotEmpty()) {
+                    android.util.Log.w("WidgetApp", "Some permissions denied: ${deniedPermissions.joinToString()}")
+                    android.util.Log.w("WidgetApp", "Some widgets may not work correctly without these permissions")
+                } else {
+                    android.util.Log.d("WidgetApp", "All widget permissions granted")
+                }
             }
         }
     }

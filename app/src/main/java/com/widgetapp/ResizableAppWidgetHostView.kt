@@ -5,6 +5,7 @@ import android.appwidget.AppWidgetProviderInfo
 import android.content.Context
 import android.hardware.display.DisplayManager
 import android.view.Display
+import android.widget.RemoteViews
 import kotlin.math.max
 
 class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) {
@@ -369,6 +370,75 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         if (childCount > 0) {
             val child = getChildAt(0)
             child.layout(0, 0, currentWidth, currentHeight)
+        }
+    }
+    
+    override fun updateAppWidget(remoteViews: RemoteViews?) {
+        try {
+            android.util.Log.d("WidgetApp", "Attempting to update widget with RemoteViews")
+            
+            // Create non-AppCompat context for RemoteViews inflation
+            val nonAppCompatContext = NonAppCompatContext(context)
+            
+            // Apply RemoteViews using non-AppCompat context to avoid AppCompat view inflation
+            if (remoteViews != null) {
+                val view = remoteViews.apply(nonAppCompatContext, this)
+                removeAllViews()
+                addView(view)
+                android.util.Log.d("WidgetApp", "Widget updated successfully with non-AppCompat context")
+            } else {
+                super.updateAppWidget(remoteViews)
+                android.util.Log.d("WidgetApp", "Widget updated with null RemoteViews")
+            }
+            
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "RemoteViews inflation failed: ${e.message}")
+            
+            // Check if this is the specific AppCompatImageView error
+            if (e.message?.contains("AppCompatImageView") == true && e.message?.contains("setImageResource") == true) {
+                android.util.Log.d("WidgetApp", "Detected AppCompatImageView setImageResource error - applying workaround")
+                
+                try {
+                    // Create a completely new RemoteViews that avoids the problematic call
+                    if (remoteViews != null) {
+                        // For list items, try to create a simplified version without images
+                        val packageName = remoteViews.javaClass.getDeclaredField("mPackage").apply { isAccessible = true }.get(remoteViews) as String
+                        val layoutId = remoteViews.javaClass.getDeclaredField("mLayoutId").apply { isAccessible = true }.get(remoteViews) as Int
+                        
+                        android.util.Log.d("WidgetApp", "Creating simplified RemoteViews for $packageName, layout $layoutId")
+                        
+                        // Create a new RemoteViews with the same package and layout but no problematic actions
+                        val simplifiedViews = android.widget.RemoteViews(packageName, layoutId)
+                        
+                        // Apply the simplified version
+                        super.updateAppWidget(simplifiedViews)
+                        android.util.Log.d("WidgetApp", "Successfully applied simplified RemoteViews")
+                        return
+                    }
+                } catch (workaroundException: Exception) {
+                    android.util.Log.e("WidgetApp", "Workaround also failed: ${workaroundException.message}")
+                }
+            }
+            
+            // Try alternative approach: create view manually
+            if (remoteViews != null) {
+                try {
+                    android.util.Log.d("WidgetApp", "Trying alternative view creation approach...")
+                    val compatView = CompatibleRemoteViews.createCompatibleView(context, remoteViews)
+                    if (compatView != null) {
+                        removeAllViews()
+                        addView(compatView)
+                        android.util.Log.d("WidgetApp", "Successfully created widget using alternative approach")
+                        return
+                    }
+                } catch (fallbackE: Exception) {
+                    android.util.Log.e("WidgetApp", "Alternative approach also failed: ${fallbackE.message}")
+                }
+            }
+            
+            // If all else fails, just show empty content instead of crashing
+            android.util.Log.w("WidgetApp", "All approaches failed, showing empty content to prevent crash")
+            removeAllViews()
         }
     }
 }
