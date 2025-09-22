@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.os.Build
 import android.os.Bundle
+import android.hardware.display.DisplayManager
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -21,12 +22,12 @@ import com.google.android.material.floatingactionbutton.FloatingActionButton
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var widgetContainer: FrameLayout
+    private lateinit var widgetStackView: WidgetStackView
     private lateinit var appWidgetManager: AppWidgetManager
     private lateinit var widgetHost: WidgetHost
-    private var currentWidgetView: ResizableAppWidgetHostView? = null
+    private lateinit var widgetStackPersistence: WidgetStackPersistence
     private val hostId = 1024
-    private val requestWidgetPicker = 100
+    private val requestWidgetManagement = 100
     private val requestBindWidget = 101
     private val requestConfigureWidget = 102
     private val requestPermissions = 200
@@ -56,46 +57,93 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
+        // Check if running on virtual display and adjust accordingly
+        try {
+            val displayManager = getSystemService(DisplayManager::class.java)
+            val currentDisplay = windowManager.defaultDisplay
+            val displayMetrics = android.util.DisplayMetrics()
+            currentDisplay.getRealMetrics(displayMetrics)
+            
+            android.util.Log.d("WidgetApp", "Display - ID: ${currentDisplay.displayId}, name: ${currentDisplay.name}")
+            android.util.Log.d("WidgetApp", "Display - Size: ${displayMetrics.widthPixels}x${displayMetrics.heightPixels}, density: ${displayMetrics.density}")
+            
+            // Check if this is a virtual display (non-default ID or specific characteristics)
+            val isVirtualDisplay = currentDisplay.displayId != android.view.Display.DEFAULT_DISPLAY || 
+                                 currentDisplay.name?.contains("overlay", ignoreCase = true) == true ||
+                                 currentDisplay.name?.contains("virtual", ignoreCase = true) == true
+            
+            if (isVirtualDisplay) {
+                android.util.Log.w("WidgetApp", "Running on virtual display - applying VD optimizations")
+                configureForVirtualDisplay()
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "Could not determine display type: ${e.message}")
+        }
+        
         // Install AppCompat compatibility hooks before any widget operations
         AppCompatRemoteViewsHook.installCompatibilityHooks(this)
         
         setContentView(R.layout.activity_main)
 
-        widgetContainer = findViewById(R.id.widget_container)
-        val fabAddWidget: FloatingActionButton = findViewById(R.id.fab_add_widget)
+        // Replace FrameLayout with WidgetStackView
+        val container = findViewById<FrameLayout>(R.id.widget_container)
+        widgetStackView = WidgetStackView(this)
+        container.addView(widgetStackView, FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT
+        ))
+        
+        val fabSettings: FloatingActionButton = findViewById(R.id.fab_settings)
         val fabSmaller: FloatingActionButton = findViewById(R.id.fab_smaller)
         val fabBigger: FloatingActionButton = findViewById(R.id.fab_bigger)
         val fabScaleDown: FloatingActionButton = findViewById(R.id.fab_scale_down)
         val fabScaleUp: FloatingActionButton = findViewById(R.id.fab_scale_up)
+        val fabFullSize: FloatingActionButton = findViewById(R.id.fab_full_size)
         val sizeInfo: TextView = findViewById(R.id.size_info)
         val controlPanel = findViewById<ViewGroup>(R.id.control_panel)
 
         appWidgetManager = AppWidgetManager.getInstance(this)
         widgetHost = WidgetHost(this, hostId)
+        widgetStackPersistence = WidgetStackPersistence(this)
+        widgetStackView.initialize(widgetHost)
 
-        fabAddWidget.setOnClickListener {
-            openWidgetPicker()
+        fabSettings.setOnClickListener {
+            openWidgetManagement()
         }
 
         fabSmaller.setOnClickListener {
-            currentWidgetView?.makeSmaller()
+            widgetStackView.makeSmaller()
             updateSizeInfo()
         }
 
         fabBigger.setOnClickListener {
-            currentWidgetView?.makeBigger()
+            widgetStackView.makeBigger()
             updateSizeInfo()
         }
 
         fabScaleDown.setOnClickListener {
-            currentWidgetView?.scaleDown()
+            widgetStackView.scaleDown()
             updateSizeInfo()
         }
 
         fabScaleUp.setOnClickListener {
-            currentWidgetView?.scaleUp()
+            widgetStackView.scaleUp()
             updateSizeInfo()
         }
+        
+        fabFullSize.setOnClickListener {
+            widgetStackView.toggleFullSizeMode()
+            updateSizeInfo()
+        }
+        
+        widgetStackView.onWidgetStackChangeListener = {
+            updateSizeInfo()
+            updateControlPanelVisibility()
+            saveWidgetStack()
+        }
+        
+        // Load persisted widget stack
+        loadPersistedWidgetStack()
         
         // Request permissions needed for widgets
         requestWidgetPermissions()
@@ -109,24 +157,41 @@ class MainActivity : AppCompatActivity() {
     override fun onPause() {
         super.onPause()
         widgetHost.stopListening()
+        // Save widget stack when app goes to background
+        saveWidgetStack()
+    }
+    
+    override fun onDestroy() {
+        super.onDestroy()
+        // Save final widget stack state
+        saveWidgetStack()
     }
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Widget and layout will automatically adapt to new orientation
-        // since the activity is not destroyed/recreated
-        currentWidgetView?.let { widget ->
-            // Refresh the widget to ensure it adapts to new screen dimensions
-            widget.post {
-                widget.refreshWidget()
-                updateSizeInfo()
-            }
+        android.util.Log.d("WidgetApp", "Configuration changed: ${newConfig.orientation}")
+        
+        // Widget stack will automatically adapt to new orientation
+        widgetStackView.post {
+            // Make sure current widget is visible after orientation change
+            val currentWidget = widgetStackView.getCurrentWidget()
+            android.util.Log.d("WidgetApp", "Current widget after rotation: ${currentWidget != null}")
+            
+            widgetStackView.refreshCurrentWidget()
+            updateSizeInfo()
         }
     }
 
-    private fun openWidgetPicker() {
-        val intent = Intent(this, WidgetPickerActivity::class.java)
-        startActivityForResult(intent, requestWidgetPicker)
+    private fun openWidgetManagement() {
+        val intent = Intent(this, WidgetManagementActivity::class.java)
+        val serializableWidgets = widgetStackView.getWidgetStack().getAllWidgets().map { 
+            SerializableWidgetStackItem.fromWidgetStackItem(it) 
+        }
+        intent.putExtra(
+            WidgetManagementActivity.EXTRA_WIDGET_STACK_DATA, 
+            ArrayList(serializableWidgets)
+        )
+        startActivityForResult(intent, requestWidgetManagement)
     }
 
     @Deprecated("Deprecated in Java")
@@ -134,9 +199,30 @@ class MainActivity : AppCompatActivity() {
         super.onActivityResult(requestCode, resultCode, data)
         
         when (requestCode) {
-            requestWidgetPicker -> {
-                if (resultCode == Activity.RESULT_OK && data != null) {
-                    val componentName = data.getParcelableExtra<ComponentName>("widget_provider")
+            requestWidgetManagement -> {
+                if (resultCode == WidgetManagementActivity.RESULT_STACK_UPDATED && data != null) {
+                    val serializableWidgets = data.getSerializableExtra(
+                        WidgetManagementActivity.EXTRA_WIDGET_STACK_DATA
+                    ) as? ArrayList<SerializableWidgetStackItem>
+                    
+                    serializableWidgets?.let { widgets ->
+                        convertAndUpdateWidgetStack(widgets)
+                    }
+                } else if (resultCode == WidgetManagementActivity.RESULT_ADD_WIDGET && data != null) {
+                    // Handle new widget addition from management screen
+                    val componentName = data.getParcelableExtra<ComponentName>(
+                        WidgetManagementActivity.EXTRA_NEW_WIDGET_COMPONENT
+                    )
+                    val serializableWidgets = data.getSerializableExtra(
+                        WidgetManagementActivity.EXTRA_WIDGET_STACK_DATA
+                    ) as? ArrayList<SerializableWidgetStackItem>
+                    
+                    // First restore the existing widgets
+                    serializableWidgets?.let { widgets ->
+                        convertAndUpdateWidgetStack(widgets.filter { it.pendingPackageName == null })
+                    }
+                    
+                    // Then add the new widget through proper flow
                     componentName?.let { addWidget(it) }
                 }
             }
@@ -153,13 +239,91 @@ class MainActivity : AppCompatActivity() {
                     val widgetId = data.getIntExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, -1)
                     if (widgetId != -1) {
                         val appWidgetInfo = appWidgetManager.getAppWidgetInfo(widgetId)
-                        createAndAddWidgetView(widgetId, appWidgetInfo)
+                        addWidgetToStack(widgetId, appWidgetInfo)
                     }
                 }
             }
         }
     }
 
+    private fun convertAndUpdateWidgetStack(serializableWidgets: List<SerializableWidgetStackItem>) {
+        val widgets = serializableWidgets.map { serializable ->
+            // Try to get the AppWidgetInfo for existing widgets
+            val appWidgetInfo = if (serializable.widgetId != -1) {
+                try {
+                    appWidgetManager.getAppWidgetInfo(serializable.widgetId)
+                } catch (e: Exception) {
+                    null
+                }
+            } else null
+            
+            SerializableWidgetStackItem.toWidgetStackItem(serializable, appWidgetInfo)
+        }
+        updateWidgetStack(widgets)
+    }
+    
+    private fun updateWidgetStack(widgets: List<WidgetStackItem>) {
+        // Temporarily disable change listener to avoid saving during restoration
+        val originalListener = widgetStackView.onWidgetStackChangeListener
+        widgetStackView.onWidgetStackChangeListener = null
+        
+        try {
+            // Clear current stack
+            widgetStackView.clearWidgetStack()
+            
+            // Separate existing widgets from new widgets
+            val existingWidgets = widgets.filter { it.pendingComponent == null && it.widgetId != -1 }
+            val newWidgets = widgets.filter { it.pendingComponent != null }
+            
+            // Restore existing widgets first
+            if (existingWidgets.isNotEmpty()) {
+                widgetStackView.restoreWidgetStack(existingWidgets)
+            }
+            
+            // Re-enable change listener
+            widgetStackView.onWidgetStackChangeListener = originalListener
+            
+            // Process new widgets (these will trigger the change listener)
+            for (widget in newWidgets) {
+                widget.pendingComponent?.let { component ->
+                    addWidget(component)
+                }
+            }
+            
+        } catch (e: Exception) {
+            android.util.Log.e("WidgetApp", "Failed to update widget stack: ${e.message}", e)
+            // Re-enable change listener even if there's an error
+            widgetStackView.onWidgetStackChangeListener = originalListener
+        }
+        
+        updateControlPanelVisibility()
+        updateSizeInfo()
+    }
+    
+    private fun loadPersistedWidgetStack() {
+        val persistedWidgets = widgetStackPersistence.loadWidgetStack(widgetStackView.getWidgetStack())
+        
+        if (persistedWidgets.isNotEmpty()) {
+            // Temporarily disable change listener to avoid saving during restoration
+            val originalListener = widgetStackView.onWidgetStackChangeListener
+            widgetStackView.onWidgetStackChangeListener = null
+            
+            try {
+                widgetStackView.restoreWidgetStack(persistedWidgets)
+            } finally {
+                // Re-enable change listener
+                widgetStackView.onWidgetStackChangeListener = originalListener
+            }
+        }
+        
+        updateControlPanelVisibility()
+        updateSizeInfo()
+    }
+    
+    private fun saveWidgetStack() {
+        widgetStackPersistence.saveWidgetStack(widgetStackView.getWidgetStack())
+    }
+    
     private fun addWidget(componentName: ComponentName) {
         val widgetId = widgetHost.allocateAppWidgetId()
         
@@ -185,95 +349,56 @@ class MainActivity : AppCompatActivity() {
             }
             startActivityForResult(intent, requestConfigureWidget)
         } else {
-            createAndAddWidgetView(widgetId, appWidgetInfo)
+            addWidgetToStack(widgetId, appWidgetInfo)
         }
     }
 
-    private fun createAndAddWidgetView(widgetId: Int, appWidgetInfo: AppWidgetProviderInfo?) {
-        // Clean up existing widget if any
-        currentWidgetView?.let {
-            widgetHost.deleteAppWidgetId(it.appWidgetId)
-        }
-        
-        android.util.Log.d("WidgetApp", "Creating widget view for: ${appWidgetInfo?.loadLabel(packageManager)}")
-        android.util.Log.d("WidgetApp", "Widget provider: ${appWidgetInfo?.provider}")
-        android.util.Log.d("WidgetApp", "Widget ID: $widgetId")
-        
+    private fun addWidgetToStack(widgetId: Int, appWidgetInfo: AppWidgetProviderInfo?) {
         try {
-            val hostView = widgetHost.createView(this, widgetId, appWidgetInfo) as ResizableAppWidgetHostView
-            android.util.Log.d("WidgetApp", "Widget host view created successfully")
-        
-        widgetContainer.removeAllViews()
-        
-        // Get actual widget size requirements (already in pixels)
-        val minWidth = appWidgetInfo?.minWidth ?: 280
-        val minHeight = appWidgetInfo?.minHeight ?: 140
-        val minResizeWidth = appWidgetInfo?.minResizeWidth ?: minWidth  
-        val minResizeHeight = appWidgetInfo?.minResizeHeight ?: minHeight
-        
-        // Debug logging
-        android.util.Log.d("WidgetApp", "Widget: ${appWidgetInfo?.loadLabel(packageManager)}")
-        android.util.Log.d("WidgetApp", "minWidth: $minWidth, minHeight: $minHeight")
-        android.util.Log.d("WidgetApp", "minResizeWidth: $minResizeWidth, minResizeHeight: $minResizeHeight")
-        
-        // Initialize the widget view with proper constraints
-        hostView.initializeWidget(
-            appWidgetInfo,
-            minWidth,
-            minHeight,
-            minResizeWidth,
-            minResizeHeight
-        )
-        
-        val layoutParams = FrameLayout.LayoutParams(
-            minWidth,  // Use actual widget width instead of WRAP_CONTENT
-            minHeight  // Use actual widget height instead of WRAP_CONTENT
-        ).apply {
-            gravity = android.view.Gravity.CENTER
-        }
-        
-        widgetContainer.addView(hostView, layoutParams)
-        currentWidgetView = hostView
-        
-        findViewById<ViewGroup>(R.id.control_panel).visibility = ViewGroup.VISIBLE
-        
-        // Start listening after the view is added
-        widgetHost.startListening()
-        
-        // Post to ensure the widget is properly laid out
-        hostView.post {
-            android.util.Log.d("WidgetApp", "Refreshing widget...")
-            hostView.refreshWidget()
+            widgetStackView.addWidget(widgetId, appWidgetInfo)
+            
+            // Start listening after the widget is added
+            widgetHost.startListening()
+            
+            updateControlPanelVisibility()
             updateSizeInfo()
-            android.util.Log.d("WidgetApp", "Widget setup complete")
-        }
-        
+            
         } catch (e: Exception) {
-            android.util.Log.e("WidgetApp", "Failed to create widget: ${e.message}", e)
+            android.util.Log.e("WidgetApp", "Failed to add widget to stack: ${e.message}", e)
             
             // Clean up failed widget
             widgetHost.deleteAppWidgetId(widgetId)
             
-            // Show detailed error
+            // Show error message
             val sizeInfo = findViewById<TextView>(R.id.size_info)
-            sizeInfo.text = "Couldn't add widget\nWidget: ${appWidgetInfo?.loadLabel(packageManager) ?: "Unknown"}\nError: ${e.message}\n\nThis widget may use AppCompat views that aren't compatible with RemoteViews."
+            sizeInfo.text = "Couldn't add widget\nWidget: ${appWidgetInfo?.loadLabel(packageManager) ?: "Unknown"}\nError: ${e.message}"
             sizeInfo.visibility = ViewGroup.VISIBLE
-            findViewById<ViewGroup>(R.id.control_panel).visibility = ViewGroup.GONE
         }
     }
     
     private fun updateSizeInfo() {
         val sizeInfo = findViewById<TextView>(R.id.size_info)
-        currentWidgetView?.let { widget ->
-            val currentSizeInfo = widget.getSizeInfo()
-            val constraintsInfo = widget.getWidgetConstraints()
-            val fullInfo = "$currentSizeInfo\n\n$constraintsInfo"
-            
-            if (currentSizeInfo.isNotEmpty()) {
-                sizeInfo.text = fullInfo
-                sizeInfo.visibility = ViewGroup.VISIBLE
-            }
+        val stackSizeInfo = widgetStackView.getSizeInfo()
+        val constraintsInfo = widgetStackView.getWidgetConstraints()
+        
+        val fullInfo = if (constraintsInfo.isNotEmpty()) {
+            "$stackSizeInfo\n\n$constraintsInfo"
+        } else {
+            stackSizeInfo
         }
+        
+        if (stackSizeInfo.isNotEmpty()) {
+            sizeInfo.text = fullInfo
+            sizeInfo.visibility = ViewGroup.VISIBLE
+        } else {
+            sizeInfo.visibility = ViewGroup.GONE
+        }
+    }
+    
+    private fun updateControlPanelVisibility() {
+        val controlPanel = findViewById<ViewGroup>(R.id.control_panel)
+        val hasWidgets = !widgetStackView.getWidgetStack().isEmpty()
+        controlPanel.visibility = if (hasWidgets) ViewGroup.VISIBLE else ViewGroup.GONE
     }
     
     private fun requestWidgetPermissions() {
@@ -310,6 +435,27 @@ class MainActivity : AppCompatActivity() {
                     android.util.Log.d("WidgetApp", "All widget permissions granted")
                 }
             }
+        }
+    }
+    
+    private fun configureForVirtualDisplay() {
+        try {
+            // Get virtual display metrics
+            val displayMetrics = resources.displayMetrics
+            android.util.Log.d("WidgetApp", "VD Configuration - density: ${displayMetrics.density}, scaledDensity: ${displayMetrics.scaledDensity}")
+            
+            // Apply virtual display specific configuration to the widget stack view
+            // Use a later callback since widgetStackView might not be initialized yet
+            findViewById<android.view.View>(android.R.id.content).post {
+                if (::widgetStackView.isInitialized) {
+                    widgetStackView.configureForVirtualDisplay(displayMetrics)
+                } else {
+                    android.util.Log.w("WidgetApp", "WidgetStackView not yet initialized for VD config")
+                }
+            }
+            
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "Failed to configure for virtual display: ${e.message}")
         }
     }
 }

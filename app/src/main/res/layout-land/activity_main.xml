@@ -5,24 +5,15 @@
     android:layout_height="match_parent"
     android:background="#000000">
 
+    <!-- Widget container - right aligned in landscape -->
     <FrameLayout
         android:id="@+id/widget_container"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:layout_centerInParent="true"
+        android:layout_toEndOf="@+id/control_panel"
+        android:layout_marginStart="16dp"
         android:clipToPadding="false"
-        android:clipChildren="false"
-        android:gravity="center" />
-
-    <com.google.android.material.floatingactionbutton.FloatingActionButton
-        android:id="@+id/fab_settings"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_alignParentEnd="true"
-        android:layout_alignParentBottom="true"
-        android:layout_margin="16dp"
-        android:src="@drawable/ic_settings_gear"
-        android:contentDescription="Widget Settings" />
+        android:clipChildren="false" />
 
     <LinearLayout
         android:id="@+id/control_panel"
@@ -46,6 +37,7 @@
             android:textSize="12sp"
             android:visibility="gone" />
 
+        <!-- Main controls row with everything in landscape -->
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -142,7 +134,8 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="vertical"
-                android:gravity="center">
+                android:gravity="center"
+                android:layout_marginEnd="12dp">
 
                 <TextView
                     android:layout_width="wrap_content"
@@ -158,6 +151,31 @@
                     android:layout_height="wrap_content"
                     android:src="@android:drawable/ic_menu_crop"
                     android:contentDescription="Toggle full size mode"
+                    app:fabSize="mini" />
+
+            </LinearLayout>
+
+            <!-- Settings at the end of the row -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:gravity="center">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Settings"
+                    android:textColor="#FFFFFF"
+                    android:textSize="9sp"
+                    android:layout_marginBottom="4dp" />
+
+                <com.google.android.material.floatingactionbutton.FloatingActionButton
+                    android:id="@+id/fab_settings"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:src="@drawable/ic_settings_gear"
+                    android:contentDescription="Widget Settings"
                     app:fabSize="mini" />
 
             </LinearLayout>

@@ -63,6 +63,11 @@
             android:name=".WidgetPickerActivity"
             android:exported="false" />
             
+        <activity
+            android:name=".WidgetManagementActivity"
+            android:exported="false"
+            android:theme="@style/Theme.WidgetApp.NoActionBar" />
+            
     </application>
 
 </manifest>

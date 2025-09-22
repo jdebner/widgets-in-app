@@ -3,9 +3,15 @@ package com.widgetapp
 import android.appwidget.AppWidgetHostView
 import android.appwidget.AppWidgetProviderInfo
 import android.content.Context
+import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.hardware.display.DisplayManager
+import android.util.DisplayMetrics
 import android.view.Display
+import android.view.View
+import android.view.ViewGroup
 import android.widget.RemoteViews
+import android.widget.TextView
 import kotlin.math.max
 
 class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) {
@@ -115,7 +121,6 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         pivotX = currentWidth / 2f
         pivotY = currentHeight / 2f
         
-        android.util.Log.d("WidgetApp", "Applied scale factor: ${scaleFactor} to widget ${currentWidth}x${currentHeight}")
     }
     
     fun refreshWidget() {
@@ -146,8 +151,6 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         val heightDp = (currentHeight / density).toInt()
         
         // Update widget with both pixel and dp sizes
-        android.util.Log.d("WidgetApp", "Updating widget size to ${widthDp}dp x ${heightDp}dp (${currentWidth}px x ${currentHeight}px)")
-        android.util.Log.d("WidgetApp", "View measured size: ${measuredWidth}x${measuredHeight}, actual size: ${width}x${height}")
         updateAppWidgetSize(null, widthDp, heightDp, widthDp, heightDp)
         
         // Force widget to re-evaluate its layout
@@ -218,12 +221,6 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
             gridSizes.add(Pair(minGridWidth, minGridHeight))
         }
         
-        android.util.Log.d("WidgetApp", "Widget grid constraints:")
-        android.util.Log.d("WidgetApp", "  Min size: ${minGridWidth}x${minGridHeight} grid units (${gridUnitsToDp(minGridWidth)}x${gridUnitsToDp(minGridHeight)}dp)")
-        android.util.Log.d("WidgetApp", "  Min resize: ${minResizeGridWidth}x${minResizeGridHeight} grid units (${gridUnitsToDp(minResizeGridWidth)}x${gridUnitsToDp(minResizeGridHeight)}dp)")
-        android.util.Log.d("WidgetApp", "  Actual max: ${actualMaxGridWidth}x${actualMaxGridHeight} grid units (${gridUnitsToDp(actualMaxGridWidth)}x${gridUnitsToDp(actualMaxGridHeight)}dp)")
-        android.util.Log.d("WidgetApp", "  App max: ${maxGridWidth}x${maxGridHeight} grid units (${gridUnitsToDp(maxGridWidth)}x${gridUnitsToDp(maxGridHeight)}dp)")
-        android.util.Log.d("WidgetApp", "Available grid sizes: ${gridSizes.map { "${it.first}x${it.second}" }}")
         
         return gridSizes.sortedWith(compareBy({ it.first }, { it.second }))
     }
@@ -373,72 +370,130 @@ class ResizableAppWidgetHostView(context: Context) : AppWidgetHostView(context) 
         }
     }
     
+    private fun getRemoteContext(): Context {
+        // Safely get the package name. If appWidgetInfo or its provider is null,
+        // the Elvis operator (?:) will cause an early return of the default context.
+        val widgetPackageName = appWidgetInfo?.provider?.packageName ?: return context
+
+        // Use a try-catch expression to return the correct context.
+        return try {
+            context.createPackageContext(widgetPackageName, Context.CONTEXT_IGNORE_SECURITY)
+        } catch (e: PackageManager.NameNotFoundException) {
+            android.util.Log.e("WidgetApp", "Could not create package context for $widgetPackageName", e)
+            // Fallback to the host's context if something goes wrong.
+            context
+        }
+    }
+    
     override fun updateAppWidget(remoteViews: RemoteViews?) {
         try {
-            android.util.Log.d("WidgetApp", "Attempting to update widget with RemoteViews")
-            
-            // Create non-AppCompat context for RemoteViews inflation
-            val nonAppCompatContext = NonAppCompatContext(context)
-            
-            // Apply RemoteViews using non-AppCompat context to avoid AppCompat view inflation
             if (remoteViews != null) {
-                val view = remoteViews.apply(nonAppCompatContext, this)
+                // For virtual displays, use more conservative context approach
+                val contextToUse = getRemoteContext() ?: context
+                val view = remoteViews.apply(contextToUse, this)
                 removeAllViews()
                 addView(view)
-                android.util.Log.d("WidgetApp", "Widget updated successfully with non-AppCompat context")
+                
+                // Apply theme fixes after inflation for better visibility
+                fixWidgetTheming(view)
             } else {
                 super.updateAppWidget(remoteViews)
-                android.util.Log.d("WidgetApp", "Widget updated with null RemoteViews")
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "RemoteViews inflation failed: ${e.message}")
+            try {
+                // Try fallback with standard approach
+                super.updateAppWidget(remoteViews)
+                // Still try to fix theming on fallback
+                getChildAt(0)?.let { view -> fixWidgetTheming(view) }
+            } catch (fallbackException: Exception) {
+                android.util.Log.w("WidgetApp", "Fallback also failed: ${fallbackException.message}")
+                removeAllViews()
+            }
+        }
+    }
+    
+    private fun createThemedContext(): Context {
+        // Create a themed context that works better with our dark background
+        val config = Configuration(context.resources.configuration)
+        config.uiMode = (config.uiMode and Configuration.UI_MODE_NIGHT_MASK.inv()) or Configuration.UI_MODE_NIGHT_YES
+        
+        return try {
+            context.createConfigurationContext(config)
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "Failed to create themed context: ${e.message}")
+            getRemoteContext() ?: context
+        }
+    }
+    
+    private fun fixWidgetTheming(view: View) {
+        try {
+            // Recursively fix text colors for better visibility on dark background
+            fixTextColors(view)
+        } catch (e: Exception) {
+            android.util.Log.w("WidgetApp", "Failed to fix widget theming: ${e.message}")
+        }
+    }
+    
+    private fun fixTextColors(view: View) {
+        when (view) {
+            is TextView -> {
+                // For analog clock and other widgets, ensure text is visible on dark background
+                val currentColor = view.currentTextColor
+                
+                // If text is very dark (likely black), make it white for visibility
+                if (isColorTooLightForDarkBackground(currentColor)) {
+                    view.setTextColor(0xFFFFFFFF.toInt()) // White text
+                    android.util.Log.d("WidgetApp", "Fixed text color for ${view.javaClass.simpleName}")
+                }
+                
+                // Also fix shadow for better contrast
+                view.setShadowLayer(2f, 1f, 1f, 0x80000000.toInt())
+            }
+            is ViewGroup -> {
+                // Recursively fix all child views
+                for (i in 0 until view.childCount) {
+                    fixTextColors(view.getChildAt(i))
+                }
+            }
+        }
+    }
+    
+    private fun isColorTooLightForDarkBackground(color: Int): Boolean {
+        // Extract RGB components
+        val red = (color shr 16) and 0xFF
+        val green = (color shr 8) and 0xFF
+        val blue = color and 0xFF
+        
+        // Calculate luminance (simplified)
+        val luminance = (0.299 * red + 0.587 * green + 0.114 * blue)
+        
+        // If luminance is low (dark text), it needs to be changed for dark background
+        return luminance < 128
+    }
+    
+    fun configureForVirtualDisplay(displayMetrics: DisplayMetrics) {
+        android.util.Log.d("WidgetApp", "Configuring widget for virtual display")
+        android.util.Log.d("WidgetApp", "  Display density: ${displayMetrics.density}")
+        android.util.Log.d("WidgetApp", "  Display size: ${displayMetrics.widthPixels}x${displayMetrics.heightPixels}")
+        android.util.Log.d("WidgetApp", "  Display DPI: ${displayMetrics.densityDpi}")
+        
+        try {
+            // For virtual displays, mainly ensure proper refresh and don't aggressively resize
+            post {
+                val currentSize = getCurrentSize()
+                android.util.Log.d("WidgetApp", "  Current widget size: ${currentSize.first}x${currentSize.second}")
+                
+                // Just force a refresh to ensure widget renders properly on VD
+                refreshWidget()
+                
+                // Update layout parameters to ensure proper rendering
+                requestLayout()
+                invalidate()
             }
             
         } catch (e: Exception) {
-            android.util.Log.w("WidgetApp", "RemoteViews inflation failed: ${e.message}")
-            
-            // Check if this is the specific AppCompatImageView error
-            if (e.message?.contains("AppCompatImageView") == true && e.message?.contains("setImageResource") == true) {
-                android.util.Log.d("WidgetApp", "Detected AppCompatImageView setImageResource error - applying workaround")
-                
-                try {
-                    // Create a completely new RemoteViews that avoids the problematic call
-                    if (remoteViews != null) {
-                        // For list items, try to create a simplified version without images
-                        val packageName = remoteViews.javaClass.getDeclaredField("mPackage").apply { isAccessible = true }.get(remoteViews) as String
-                        val layoutId = remoteViews.javaClass.getDeclaredField("mLayoutId").apply { isAccessible = true }.get(remoteViews) as Int
-                        
-                        android.util.Log.d("WidgetApp", "Creating simplified RemoteViews for $packageName, layout $layoutId")
-                        
-                        // Create a new RemoteViews with the same package and layout but no problematic actions
-                        val simplifiedViews = android.widget.RemoteViews(packageName, layoutId)
-                        
-                        // Apply the simplified version
-                        super.updateAppWidget(simplifiedViews)
-                        android.util.Log.d("WidgetApp", "Successfully applied simplified RemoteViews")
-                        return
-                    }
-                } catch (workaroundException: Exception) {
-                    android.util.Log.e("WidgetApp", "Workaround also failed: ${workaroundException.message}")
-                }
-            }
-            
-            // Try alternative approach: create view manually
-            if (remoteViews != null) {
-                try {
-                    android.util.Log.d("WidgetApp", "Trying alternative view creation approach...")
-                    val compatView = CompatibleRemoteViews.createCompatibleView(context, remoteViews)
-                    if (compatView != null) {
-                        removeAllViews()
-                        addView(compatView)
-                        android.util.Log.d("WidgetApp", "Successfully created widget using alternative approach")
-                        return
-                    }
-                } catch (fallbackE: Exception) {
-                    android.util.Log.e("WidgetApp", "Alternative approach also failed: ${fallbackE.message}")
-                }
-            }
-            
-            // If all else fails, just show empty content instead of crashing
-            android.util.Log.w("WidgetApp", "All approaches failed, showing empty content to prevent crash")
-            removeAllViews()
+            android.util.Log.w("WidgetApp", "Failed to configure widget for virtual display: ${e.message}")
         }
     }
 }
